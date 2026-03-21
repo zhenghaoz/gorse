@@ -15,15 +15,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"math"
-	"net/http"
 	"os"
 	"runtime"
 	"slices"
@@ -34,6 +31,7 @@ import (
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
+	"github.com/go-resty/resty/v2"
 	"github.com/gorse-io/gorse/common/floats"
 	"github.com/gorse-io/gorse/common/heap"
 	"github.com/gorse-io/gorse/common/log"
@@ -593,6 +591,27 @@ var (
 	adminEndpoint = os.Getenv("GORSE_ADMIN_ENDPOINT")
 )
 
+// newAdminClient creates a new resty client for admin API
+func newAdminClient(endpoint, apiKey string) *resty.Client {
+	client := resty.New()
+	client.SetBaseURL(endpoint)
+	client.SetHeader("X-Api-Key", apiKey)
+	return client
+}
+
+// getEndpointAndKey returns the endpoint and API key from flags or environment
+func getEndpointAndKey(cmd *cobra.Command) (endpoint, apiKey string) {
+	endpoint, _ = cmd.Flags().GetString("endpoint")
+	apiKey, _ = cmd.Flags().GetString("api-key")
+	if endpoint == "" {
+		endpoint = adminEndpoint
+	}
+	if apiKey == "" {
+		apiKey = adminAPIKey
+	}
+	return
+}
+
 // getCmd is the parent command for get operations
 var getCmd = &cobra.Command{
 	Use:   "get",
@@ -604,51 +623,24 @@ var getTasksCmd = &cobra.Command{
 	Use:   "tasks",
 	Short: "Get task progress from Gorse admin API",
 	Run: func(cmd *cobra.Command, args []string) {
-		// Use command line flags if provided, otherwise use environment variables
-		endpoint, _ := cmd.Flags().GetString("endpoint")
-		apiKey, _ := cmd.Flags().GetString("api-key")
-		if endpoint == "" {
-			endpoint = adminEndpoint
-		}
-		if apiKey == "" {
-			apiKey = adminAPIKey
-		}
-
+		endpoint, apiKey := getEndpointAndKey(cmd)
 		if endpoint == "" {
 			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
 		}
 
-		// Build URL
-		url := fmt.Sprintf("%s/dashboard/tasks", endpoint)
-
-		// Create HTTP request
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			log.Logger().Fatal("failed to create request", zap.Error(err))
-		}
-		req.Header.Set("X-Api-Key", apiKey)
-
-		// Send request
-		resp, err := http.DefaultClient.Do(req)
+		client := newAdminClient(endpoint, apiKey)
+		resp, err := client.R().Get("/dashboard/tasks")
 		if err != nil {
 			log.Logger().Fatal("failed to send request", zap.Error(err))
 		}
-		defer resp.Body.Close()
 
-		// Read response
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Logger().Fatal("failed to read response", zap.Error(err))
-		}
-
-		if resp.StatusCode != http.StatusOK {
+		if resp.IsError() {
 			log.Logger().Fatal("API request failed",
-				zap.Int("status", resp.StatusCode),
-				zap.String("body", string(body)))
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
 		}
 
-		// Print response
-		fmt.Println(string(body))
+		fmt.Println(resp.String())
 	},
 }
 
@@ -657,51 +649,24 @@ var getConfigCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Get configuration from Gorse admin API",
 	Run: func(cmd *cobra.Command, args []string) {
-		// Use command line flags if provided, otherwise use environment variables
-		endpoint, _ := cmd.Flags().GetString("endpoint")
-		apiKey, _ := cmd.Flags().GetString("api-key")
-		if endpoint == "" {
-			endpoint = adminEndpoint
-		}
-		if apiKey == "" {
-			apiKey = adminAPIKey
-		}
-
+		endpoint, apiKey := getEndpointAndKey(cmd)
 		if endpoint == "" {
 			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
 		}
 
-		// Build URL
-		url := fmt.Sprintf("%s/dashboard/config", endpoint)
-
-		// Create HTTP request
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			log.Logger().Fatal("failed to create request", zap.Error(err))
-		}
-		req.Header.Set("X-Api-Key", apiKey)
-
-		// Send request
-		resp, err := http.DefaultClient.Do(req)
+		client := newAdminClient(endpoint, apiKey)
+		resp, err := client.R().Get("/dashboard/config")
 		if err != nil {
 			log.Logger().Fatal("failed to send request", zap.Error(err))
 		}
-		defer resp.Body.Close()
 
-		// Read response
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Logger().Fatal("failed to read response", zap.Error(err))
-		}
-
-		if resp.StatusCode != http.StatusOK {
+		if resp.IsError() {
 			log.Logger().Fatal("API request failed",
-				zap.Int("status", resp.StatusCode),
-				zap.String("body", string(body)))
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
 		}
 
-		// Print response
-		fmt.Println(string(body))
+		fmt.Println(resp.String())
 	},
 }
 
@@ -722,16 +687,7 @@ var setConfigCmd = &cobra.Command{
   gorse-cli set config recommend.cache_size=1000 recommend.item_ttl=72h`,
 	Args: cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		// Use command line flags if provided, otherwise use environment variables
-		endpoint, _ := cmd.Flags().GetString("endpoint")
-		apiKey, _ := cmd.Flags().GetString("api-key")
-		if endpoint == "" {
-			endpoint = adminEndpoint
-		}
-		if apiKey == "" {
-			apiKey = adminAPIKey
-		}
-
+		endpoint, apiKey := getEndpointAndKey(cmd)
 		if endpoint == "" {
 			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
 		}
@@ -750,44 +706,22 @@ var setConfigCmd = &cobra.Command{
 			configPatch[key] = parseConfigValue(value)
 		}
 
-		// Build URL
-		url := fmt.Sprintf("%s/dashboard/config", endpoint)
-
-		// Marshal config patch to JSON
-		bodyBytes, err := json.Marshal(configPatch)
-		if err != nil {
-			log.Logger().Fatal("failed to marshal config", zap.Error(err))
-		}
-
-		// Create HTTP request
-		req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
-		if err != nil {
-			log.Logger().Fatal("failed to create request", zap.Error(err))
-		}
-		req.Header.Set("X-Api-Key", apiKey)
-		req.Header.Set("Content-Type", "application/json")
-
-		// Send request
-		resp, err := http.DefaultClient.Do(req)
+		client := newAdminClient(endpoint, apiKey)
+		resp, err := client.R().
+			SetHeader("Content-Type", "application/json").
+			SetBody(configPatch).
+			Post("/dashboard/config")
 		if err != nil {
 			log.Logger().Fatal("failed to send request", zap.Error(err))
 		}
-		defer resp.Body.Close()
 
-		// Read response
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Logger().Fatal("failed to read response", zap.Error(err))
-		}
-
-		if resp.StatusCode != http.StatusOK {
+		if resp.IsError() {
 			log.Logger().Fatal("API request failed",
-				zap.Int("status", resp.StatusCode),
-				zap.String("body", string(body)))
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
 		}
 
-		// Print response
-		fmt.Println(string(body))
+		fmt.Println(resp.String())
 	},
 }
 
