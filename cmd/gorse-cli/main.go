@@ -15,8 +15,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"maps"
@@ -26,6 +28,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	mapset "github.com/deckarep/golang-set/v2"
@@ -564,6 +567,11 @@ func init() {
 	getCmd.AddCommand(getConfigCmd)
 	getConfigCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
 	getConfigCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
+
+	rootCmd.AddCommand(setCmd)
+	setCmd.AddCommand(setConfigCmd)
+	setConfigCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
+	setConfigCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
 	benchLLMCmd.PersistentFlags().Bool("user-auc", false, "Export user-level AUC scores to CSV file")
 	benchEmbeddingCmd.PersistentFlags().IntP("top", "k", 10, "Number of top items to evaluate for each user")
 	benchEmbeddingCmd.PersistentFlags().IntP("shots", "s", math.MaxInt, "Number of shots for each user")
@@ -695,4 +703,114 @@ var getConfigCmd = &cobra.Command{
 		// Print response
 		fmt.Println(string(body))
 	},
+}
+
+// setCmd is the parent command for set operations
+var setCmd = &cobra.Command{
+	Use:   "set",
+	Short: "Set resources in Gorse admin API",
+}
+
+// setConfigCmd sets configuration via the admin API
+var setConfigCmd = &cobra.Command{
+	Use:   "config [key=value]...",
+	Short: "Set configuration values in Gorse admin API",
+	Example: `  # Set single config value
+  gorse-cli set config recommend.cache_size=1000
+
+  # Set multiple config values
+  gorse-cli set config recommend.cache_size=1000 recommend.item_ttl=72h`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		// Use command line flags if provided, otherwise use environment variables
+		endpoint, _ := cmd.Flags().GetString("endpoint")
+		apiKey, _ := cmd.Flags().GetString("api-key")
+		if endpoint == "" {
+			endpoint = adminEndpoint
+		}
+		if apiKey == "" {
+			apiKey = adminAPIKey
+		}
+
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
+		}
+
+		// Build config patch from arguments
+		configPatch := make(map[string]interface{})
+		for _, arg := range args {
+			parts := strings.SplitN(arg, "=", 2)
+			if len(parts) != 2 {
+				log.Logger().Fatal("invalid config format, expected key=value", zap.String("arg", arg))
+			}
+			key := parts[0]
+			value := parts[1]
+			
+			// Parse the value
+			configPatch[key] = parseConfigValue(value)
+		}
+
+		// Build URL
+		url := fmt.Sprintf("%s/dashboard/config", endpoint)
+
+		// Marshal config patch to JSON
+		bodyBytes, err := json.Marshal(configPatch)
+		if err != nil {
+			log.Logger().Fatal("failed to marshal config", zap.Error(err))
+		}
+
+		// Create HTTP request
+		req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+		if err != nil {
+			log.Logger().Fatal("failed to create request", zap.Error(err))
+		}
+		req.Header.Set("X-Api-Key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+
+		// Send request
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+		defer resp.Body.Close()
+
+		// Read response
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Logger().Fatal("failed to read response", zap.Error(err))
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(body)))
+		}
+
+		// Print response
+		fmt.Println(string(body))
+	},
+}
+
+// parseConfigValue parses a string value into appropriate type
+func parseConfigValue(value string) interface{} {
+	// Try parsing as bool
+	if value == "true" {
+		return true
+	}
+	if value == "false" {
+		return false
+	}
+
+	// Try parsing as int
+	if intVal, err := strconv.Atoi(value); err == nil {
+		return intVal
+	}
+
+	// Try parsing as float
+	if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
+		return floatVal
+	}
+
+	// Return as string
+	return value
 }
