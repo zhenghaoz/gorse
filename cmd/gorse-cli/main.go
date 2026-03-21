@@ -561,6 +561,9 @@ func init() {
 	getCmd.AddCommand(getTasksCmd)
 	getTasksCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
 	getTasksCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
+	getCmd.AddCommand(getConfigCmd)
+	getConfigCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
+	getConfigCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
 	benchLLMCmd.PersistentFlags().Bool("user-auc", false, "Export user-level AUC scores to CSV file")
 	benchEmbeddingCmd.PersistentFlags().IntP("top", "k", 10, "Number of top items to evaluate for each user")
 	benchEmbeddingCmd.PersistentFlags().IntP("shots", "s", math.MaxInt, "Number of shots for each user")
@@ -609,6 +612,59 @@ var getTasksCmd = &cobra.Command{
 
 		// Build URL
 		url := fmt.Sprintf("%s/dashboard/tasks", endpoint)
+
+		// Create HTTP request
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			log.Logger().Fatal("failed to create request", zap.Error(err))
+		}
+		req.Header.Set("X-Api-Key", apiKey)
+
+		// Send request
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+		defer resp.Body.Close()
+
+		// Read response
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			log.Logger().Fatal("failed to read response", zap.Error(err))
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode),
+				zap.String("body", string(body)))
+		}
+
+		// Print response
+		fmt.Println(string(body))
+	},
+}
+
+// getConfigCmd gets configuration from the admin API
+var getConfigCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Get configuration from Gorse admin API",
+	Run: func(cmd *cobra.Command, args []string) {
+		// Use command line flags if provided, otherwise use environment variables
+		endpoint, _ := cmd.Flags().GetString("endpoint")
+		apiKey, _ := cmd.Flags().GetString("api-key")
+		if endpoint == "" {
+			endpoint = adminEndpoint
+		}
+		if apiKey == "" {
+			apiKey = adminAPIKey
+		}
+
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
+		}
+
+		// Build URL
+		url := fmt.Sprintf("%s/dashboard/config", endpoint)
 
 		// Create HTTP request
 		req, err := http.NewRequest("GET", url, nil)
