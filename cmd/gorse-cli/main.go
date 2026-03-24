@@ -61,8 +61,14 @@ var rootCmd = &cobra.Command{
 	},
 }
 
-var benchLLMCmd = &cobra.Command{
-	Use:   "bench-llm",
+// benchCmd is the parent command for benchmark operations
+var benchCmd = &cobra.Command{
+	Use:   "bench",
+	Short: "Benchmark operations for Gorse",
+}
+
+var llmCmd = &cobra.Command{
+	Use:   "llm",
 	Short: "Benchmark LLM models for ranking",
 	Run: func(cmd *cobra.Command, args []string) {
 		// Load configuration
@@ -468,8 +474,8 @@ func EvaluateEmbedding(cfg *config.Config, train, test dataset.CFSplit, embeddin
 	scores.Store(fmt.Sprintf("%s (%d)", cfg.OpenAI.EmbeddingModel, dimensions.Load()), score)
 }
 
-var benchEmbeddingCmd = &cobra.Command{
-	Use:   "bench-embedding",
+var embeddingCmd = &cobra.Command{
+	Use:   "embedding",
 	Short: "Benchmark embedding models for item-to-item",
 	Run: func(cmd *cobra.Command, args []string) {
 		// Load configuration
@@ -553,30 +559,87 @@ var benchEmbeddingCmd = &cobra.Command{
 	},
 }
 
+// getClusterCmd gets cluster nodes from the admin API
+var getClusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Get cluster nodes from Gorse admin API",
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
+		}
+
+		client := newAdminClient(endpoint, apiKey)
+		resp, err := client.R().Get("/dashboard/cluster")
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		// Parse and format output
+		var nodes []ClusterNode
+		if err := json.Unmarshal(resp.Body(), &nodes); err != nil {
+			log.Logger().Fatal("failed to parse response", zap.Error(err))
+		}
+
+		// Format as table
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{"Type", "UUID", "Hostname", "Version", "Update Time"})
+		for _, node := range nodes {
+			table.Append([]string{
+				node.Type,
+				node.UUID,
+				node.Hostname,
+				node.Version,
+				node.UpdateTime.Format("2006-01-02 15:04:05"),
+			})
+		}
+		table.Render()
+	},
+}
+
+// ClusterNode represents a node in the cluster
+type ClusterNode struct {
+	UUID       string    `json:"uuid"`
+	Hostname   string    `json:"hostname"`
+	Type       string    `json:"type"`
+	Version    string    `json:"version"`
+	UpdateTime time.Time `json:"update_time"`
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", "", "Path to configuration file")
 	rootCmd.PersistentFlags().IntP("jobs", "j", runtime.NumCPU(), "Number of jobs to run in parallel")
-	rootCmd.AddCommand(benchLLMCmd)
-	rootCmd.AddCommand(benchEmbeddingCmd)
+	rootCmd.AddCommand(benchCmd)
+	benchCmd.AddCommand(llmCmd)
+	benchCmd.AddCommand(embeddingCmd)
 	rootCmd.AddCommand(getCmd)
 	getCmd.AddCommand(getTasksCmd)
 	getTasksCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
 	getTasksCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
 	getCmd.AddCommand(getConfigCmd)
+	getCmd.AddCommand(getClusterCmd)
 	getConfigCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
 	getConfigCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
+	getClusterCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
+	getClusterCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
 
 	rootCmd.AddCommand(setCmd)
 	setCmd.AddCommand(setConfigCmd)
 	setConfigCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
 	setConfigCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
-	benchLLMCmd.PersistentFlags().Bool("user-auc", false, "Export user-level AUC scores to CSV file")
-	benchEmbeddingCmd.PersistentFlags().IntP("top", "k", 10, "Number of top items to evaluate for each user")
-	benchEmbeddingCmd.PersistentFlags().IntP("shots", "s", math.MaxInt, "Number of shots for each user")
-	benchEmbeddingCmd.PersistentFlags().Int("embedding-dimensions", 0, "Embedding dimensions")
-	benchEmbeddingCmd.PersistentFlags().String("embedding-model", "", "Embedding model")
-	benchEmbeddingCmd.PersistentFlags().String("embedding-column", "", "Column name of embedding in item label")
-	benchEmbeddingCmd.PersistentFlags().String("text-column", "", "Column name of text in item label")
+	llmCmd.PersistentFlags().Bool("user-auc", false, "Export user-level AUC scores to CSV file")
+	embeddingCmd.PersistentFlags().IntP("top", "k", 10, "Number of top items to evaluate for each user")
+	embeddingCmd.PersistentFlags().IntP("shots", "s", math.MaxInt, "Number of shots for each user")
+	embeddingCmd.PersistentFlags().Int("embedding-dimensions", 0, "Embedding dimensions")
+	embeddingCmd.PersistentFlags().String("embedding-model", "", "Embedding model")
+	embeddingCmd.PersistentFlags().String("embedding-column", "", "Column name of embedding in item label")
+	embeddingCmd.PersistentFlags().String("text-column", "", "Column name of text in item label")
 }
 
 func main() {
@@ -748,3 +811,6 @@ func parseConfigValue(value string) interface{} {
 	// Return as string
 	return value
 }
+
+
+
