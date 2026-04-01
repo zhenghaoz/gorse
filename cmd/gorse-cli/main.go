@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -24,11 +25,13 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
+	"github.com/go-resty/resty/v2"
 	"github.com/gorse-io/gorse/common/floats"
 	"github.com/gorse-io/gorse/common/heap"
 	"github.com/gorse-io/gorse/common/log"
@@ -58,8 +61,14 @@ var rootCmd = &cobra.Command{
 	},
 }
 
-var benchLLMCmd = &cobra.Command{
-	Use:   "bench-llm",
+// benchCmd is the parent command for benchmark operations
+var benchCmd = &cobra.Command{
+	Use:   "bench",
+	Short: "Benchmark operations for Gorse",
+}
+
+var llmCmd = &cobra.Command{
+	Use:   "llm",
 	Short: "Benchmark LLM models for ranking",
 	Run: func(cmd *cobra.Command, args []string) {
 		// Load configuration
@@ -466,8 +475,8 @@ func EvaluateEmbedding(cfg *config.Config, train, test dataset.CFSplit, embeddin
 	scores.Store(fmt.Sprintf("%s (%d)", cfg.OpenAI.EmbeddingModel, dimensions.Load()), score)
 }
 
-var benchEmbeddingCmd = &cobra.Command{
-	Use:   "bench-embedding",
+var embeddingCmd = &cobra.Command{
+	Use:   "embedding",
 	Short: "Benchmark embedding models for item-to-item",
 	Run: func(cmd *cobra.Command, args []string) {
 		// Load configuration
@@ -552,18 +561,87 @@ var benchEmbeddingCmd = &cobra.Command{
 	},
 }
 
+// getClusterCmd gets cluster nodes from the admin API
+var getClusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Get cluster nodes from Gorse admin API",
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
+		}
+
+		client := newAdminClient(endpoint, apiKey)
+		resp, err := client.R().Get("/dashboard/cluster")
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		// Parse and format output
+		var nodes []ClusterNode
+		if err := json.Unmarshal(resp.Body(), &nodes); err != nil {
+			log.Logger().Fatal("failed to parse response", zap.Error(err))
+		}
+
+		// Format as table
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{"Type", "UUID", "Hostname", "Version", "Update Time"})
+		for _, node := range nodes {
+			table.Append([]string{
+				node.Type,
+				node.UUID,
+				node.Hostname,
+				node.Version,
+				node.UpdateTime.Format("2006-01-02 15:04:05"),
+			})
+		}
+		table.Render()
+	},
+}
+
+// ClusterNode represents a node in the cluster
+type ClusterNode struct {
+	UUID       string    `json:"uuid"`
+	Hostname   string    `json:"hostname"`
+	Type       string    `json:"type"`
+	Version    string    `json:"version"`
+	UpdateTime time.Time `json:"update_time"`
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringP("config", "c", "", "Path to configuration file")
 	rootCmd.PersistentFlags().IntP("jobs", "j", runtime.NumCPU(), "Number of jobs to run in parallel")
-	rootCmd.AddCommand(benchLLMCmd)
-	rootCmd.AddCommand(benchEmbeddingCmd)
-	benchLLMCmd.PersistentFlags().Bool("user-auc", false, "Export user-level AUC scores to CSV file")
-	benchEmbeddingCmd.PersistentFlags().IntP("top", "k", 10, "Number of top items to evaluate for each user")
-	benchEmbeddingCmd.PersistentFlags().IntP("shots", "s", math.MaxInt, "Number of shots for each user")
-	benchEmbeddingCmd.PersistentFlags().Int("embedding-dimensions", 0, "Embedding dimensions")
-	benchEmbeddingCmd.PersistentFlags().String("embedding-model", "", "Embedding model")
-	benchEmbeddingCmd.PersistentFlags().String("embedding-column", "", "Column name of embedding in item label")
-	benchEmbeddingCmd.PersistentFlags().String("text-column", "", "Column name of text in item label")
+	rootCmd.AddCommand(benchCmd)
+	benchCmd.AddCommand(llmCmd)
+	benchCmd.AddCommand(embeddingCmd)
+	rootCmd.AddCommand(getCmd)
+	getCmd.AddCommand(getTasksCmd)
+	getTasksCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
+	getTasksCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
+	getCmd.AddCommand(getConfigCmd)
+	getCmd.AddCommand(getClusterCmd)
+	getConfigCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
+	getConfigCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
+	getClusterCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
+	getClusterCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
+
+	rootCmd.AddCommand(setCmd)
+	setCmd.AddCommand(setConfigCmd)
+	setConfigCmd.Flags().String("endpoint", "", "Gorse admin API endpoint (default: GORSE_ADMIN_ENDPOINT)")
+	setConfigCmd.Flags().String("api-key", "", "Gorse admin API key (default: GORSE_ADMIN_API_KEY)")
+	llmCmd.PersistentFlags().Bool("user-auc", false, "Export user-level AUC scores to CSV file")
+	embeddingCmd.PersistentFlags().IntP("top", "k", 10, "Number of top items to evaluate for each user")
+	embeddingCmd.PersistentFlags().IntP("shots", "s", math.MaxInt, "Number of shots for each user")
+	embeddingCmd.PersistentFlags().Int("embedding-dimensions", 0, "Embedding dimensions")
+	embeddingCmd.PersistentFlags().String("embedding-model", "", "Embedding model")
+	embeddingCmd.PersistentFlags().String("embedding-column", "", "Column name of embedding in item label")
+	embeddingCmd.PersistentFlags().String("text-column", "", "Column name of text in item label")
 }
 
 func main() {
@@ -571,3 +649,170 @@ func main() {
 		log.Logger().Fatal("failed to execute command", zap.Error(err))
 	}
 }
+
+// Admin API configuration from environment variables
+var (
+	adminAPIKey   = os.Getenv("GORSE_ADMIN_API_KEY")
+	adminEndpoint = os.Getenv("GORSE_ADMIN_ENDPOINT")
+)
+
+// newAdminClient creates a new resty client for admin API
+func newAdminClient(endpoint, apiKey string) *resty.Client {
+	client := resty.New()
+	client.SetBaseURL(endpoint)
+	client.SetHeader("X-Api-Key", apiKey)
+	return client
+}
+
+// getEndpointAndKey returns the endpoint and API key from flags or environment
+func getEndpointAndKey(cmd *cobra.Command) (endpoint, apiKey string) {
+	endpoint, _ = cmd.Flags().GetString("endpoint")
+	apiKey, _ = cmd.Flags().GetString("api-key")
+	if endpoint == "" {
+		endpoint = adminEndpoint
+	}
+	if apiKey == "" {
+		apiKey = adminAPIKey
+	}
+	return
+}
+
+// getCmd is the parent command for get operations
+var getCmd = &cobra.Command{
+	Use:   "get",
+	Short: "Get resources from Gorse admin API",
+}
+
+// getTasksCmd gets tasks from the admin API
+var getTasksCmd = &cobra.Command{
+	Use:   "tasks",
+	Short: "Get task progress from Gorse admin API",
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
+		}
+
+		client := newAdminClient(endpoint, apiKey)
+		resp, err := client.R().Get("/dashboard/tasks")
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		fmt.Println(resp.String())
+	},
+}
+
+// getConfigCmd gets configuration from the admin API
+var getConfigCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Get configuration from Gorse admin API",
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
+		}
+
+		client := newAdminClient(endpoint, apiKey)
+		resp, err := client.R().Get("/dashboard/config")
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		fmt.Println(resp.String())
+	},
+}
+
+// setCmd is the parent command for set operations
+var setCmd = &cobra.Command{
+	Use:   "set",
+	Short: "Set resources in Gorse admin API",
+}
+
+// setConfigCmd sets configuration via the admin API
+var setConfigCmd = &cobra.Command{
+	Use:   "config [key=value]...",
+	Short: "Set configuration values in Gorse admin API",
+	Example: `  # Set single config value
+  gorse-cli set config recommend.cache_size=1000
+
+  # Set multiple config values
+  gorse-cli set config recommend.cache_size=1000 recommend.item_ttl=72h`,
+	Args: cobra.MinimumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		endpoint, apiKey := getEndpointAndKey(cmd)
+		if endpoint == "" {
+			log.Logger().Fatal("GORSE_ADMIN_ENDPOINT or --endpoint is required")
+		}
+
+		// Build config patch from arguments
+		configPatch := make(map[string]interface{})
+		for _, arg := range args {
+			parts := strings.SplitN(arg, "=", 2)
+			if len(parts) != 2 {
+				log.Logger().Fatal("invalid config format, expected key=value", zap.String("arg", arg))
+			}
+			key := parts[0]
+			value := parts[1]
+			
+			// Parse the value
+			configPatch[key] = parseConfigValue(value)
+		}
+
+		client := newAdminClient(endpoint, apiKey)
+		resp, err := client.R().
+			SetHeader("Content-Type", "application/json").
+			SetBody(configPatch).
+			Post("/dashboard/config")
+		if err != nil {
+			log.Logger().Fatal("failed to send request", zap.Error(err))
+		}
+
+		if resp.IsError() {
+			log.Logger().Fatal("API request failed",
+				zap.Int("status", resp.StatusCode()),
+				zap.String("body", resp.String()))
+		}
+
+		fmt.Println(resp.String())
+	},
+}
+
+// parseConfigValue parses a string value into appropriate type
+func parseConfigValue(value string) interface{} {
+	// Try parsing as bool
+	if value == "true" {
+		return true
+	}
+	if value == "false" {
+		return false
+	}
+
+	// Try parsing as int
+	if intVal, err := strconv.Atoi(value); err == nil {
+		return intVal
+	}
+
+	// Try parsing as float
+	if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
+		return floatVal
+	}
+
+	// Return as string
+	return value
+}
+
+
+
